@@ -58,7 +58,9 @@ public class ApodRepository implements SharedPreferences.OnSharedPreferenceChang
   private final ApodDatabase database;
   private final ApodService nasa;
   private final Executor networkPool;
+  private final Executor mruPool;
   private final SharedPreferences preferences;
+  private int cacheSize;
 
   private ApodRepository() {
     if (context == null) {
@@ -67,8 +69,10 @@ public class ApodRepository implements SharedPreferences.OnSharedPreferenceChang
     database = ApodDatabase.getInstance();
     nasa = ApodService.getInstance();
     networkPool = Executors.newFixedThreadPool(NETWORK_THREAD_COUNT);
+    mruPool = Executors.newSingleThreadExecutor();
     preferences = PreferenceManager.getDefaultSharedPreferences(context);
     preferences.registerOnSharedPreferenceChangeListener(this);
+    cacheSize = getCacheSizePreference();
   }
 
   public static void setContext(Application context) {
@@ -117,6 +121,7 @@ public class ApodRepository implements SharedPreferences.OnSharedPreferenceChang
                   }
                 })
                 .subscribeOn(Schedulers.from(networkPool))
+                .doAfterSuccess((ignorePath) -> retainMru(cacheSize))
                 .subscribe(observer)
         );
   }
@@ -216,9 +221,32 @@ public class ApodRepository implements SharedPreferences.OnSharedPreferenceChang
 
   @Override
   public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
-    int cacheSize = preferences.getInt(context.getString(R.string.cache_size), 0);
-    Log.d(getClass().getName(), String.format("Cache size = %d", cacheSize));
-    // TODO Use updated preference.
+    cacheSize = getCacheSizePreference();
+    // TODO Use additional updated preference, as necessary
+  }
+
+  private int getCacheSizePreference() {
+    return preferences.getInt(context.getString(R.string.cache_size), 0);
+  }
+
+  private void retainMru(int limit) {
+    if (limit > 0) {
+      int[] count = {0}; // Use element 0 as counter; array reference is effectively final.
+      ApodDao dao = database.getApodDao();
+      dao.selectMru()
+          .subscribeOn(Schedulers.from(mruPool))
+          .subscribe(
+              (apods) -> {
+                for (Apod apod : apods) {
+                  File file = getFile(apod);
+                  if (file.exists() && ++count[0] > limit) {
+                    file.delete();
+                  }
+                }
+              },
+              (throwable) -> {/* TODO Handle failure in some way. */}
+          );
+    }
   }
 
   private static class InstanceHolder {
